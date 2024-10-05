@@ -168,6 +168,12 @@ CRT_Hit VulkanRTX::RayQuery_NearestHit(LiteMath::float4 posAndNear, LiteMath::fl
   return result;
 }
 
+CRT_Hit VulkanRTX::RayQuery_NearestHitGS(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar)
+{
+  CRT_Hit hit = RayQuery_NearestHit(posAndNear, dirAndFar);
+  return hit;
+}
+
 bool VulkanRTX::RayQuery_AnyHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar)
 {
   return false;

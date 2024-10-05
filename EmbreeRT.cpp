@@ -28,6 +28,7 @@ public:
   void     UpdateInstance(uint32_t a_instanceId, const LiteMath::float4x4& a_matrix) override;
 
   CRT_Hit  RayQuery_NearestHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) override;
+  CRT_Hit  RayQuery_NearestHitGS(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) override;
   bool     RayQuery_AnyHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) override;
   CRT_Hit  RayQuery_NearestHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time) override;
   bool     RayQuery_AnyHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time) override;
@@ -360,6 +361,12 @@ CRT_Hit  EmbreeRT::RayQuery_NearestHit(LiteMath::float4 posAndNear, LiteMath::fl
   }
 
   return result;
+}
+
+CRT_Hit EmbreeRT::RayQuery_NearestHitGS(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar)
+{
+  CRT_Hit hit = RayQuery_NearestHit(posAndNear, dirAndFar);
+  return hit;
 }
 
 bool EmbreeRT::RayQuery_AnyHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar)
