@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "LiteMath.h"
+using LiteMath::float3;
 using LiteMath::float4;
 
 enum BuildOptions 
@@ -27,6 +28,17 @@ struct CRT_Hit
   uint32_t instId;
   uint32_t geomId;    ///< use 4 most significant bits for geometry type; thay are zero for triangles 
   float    coords[4]; ///< custom intersection data; for triangles coords[0] and coords[1] stores baricentric coords (u,v)
+
+#ifndef DISABLE_GS_PRIMITIVE
+  uint32_t gaussian_buffer_size;
+
+  uint32_t gaussian_index_buffer[2048];
+  float gaussian_distance_buffer[2048];
+  float gaussian_tau_buffer[2048];
+
+  float3 ray_pos;
+  float3 ray_dir;
+#endif
 };
 
 /// @brief custom objects via aabb flag
@@ -146,6 +158,13 @@ struct ISceneObject
   */
   virtual CRT_Hit RayQuery_NearestHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) = 0;
 
+  /**
+  \brief Find nearest gaussian intersection of ray segment (Near,Far) and scene geometry
+  \param posAndNear   - ray origin (x,y,z) and t_near (w)
+  \param dirAndFar    - ray direction (x,y,z) and t_far (w)
+  \return             - closest hit surface info
+  */
+  virtual CRT_Hit RayQuery_NearestHitGS(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) = 0;
 
   /**
   \brief Find nearest intersection of ray segment (Near,Far) and scene geometry
