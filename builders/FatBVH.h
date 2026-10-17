@@ -6,7 +6,6 @@
 #include <string>
 
 #include "LiteMath.h"
-#include "utils/LiteMath_ext/AABB.h"
 //#include "aligned_alloc.h"
 
 using LiteMath::cross;
@@ -24,7 +23,6 @@ using LiteMath::uint;
 using LiteMath::uint2;
 using LiteMath::uint4;
 using LiteMath::Box4f;
-using LiteMath::AABB;
 
 #include "CrossRT.h"
 #include "raytrace_common.h"
@@ -38,20 +36,20 @@ using cbvh2::BVHNodeFat;
 using std::isnan;
 
 /// Bounding box of the left child
-static inline AABB GetChildBoxLeft(const BVHNodeFat& node)
+static inline Box4f GetChildBoxLeft(const BVHNodeFat& node)
 {
-  AABB box;
-  box.mn = to_float3(node.lmin_xyz_rmax_x);
-  box.mx = to_float3(node.lmax_xyz_rmax_y);
+  Box4f box;
+  box.boxMin = float4(node.lmin_xyz_rmax_x.x, node.lmin_xyz_rmax_x.y, node.lmin_xyz_rmax_x.z, 1.0f);
+  box.boxMax = float4(node.lmax_xyz_rmax_y.x, node.lmax_xyz_rmax_y.y, node.lmax_xyz_rmax_y.z, 1.0f);
   return box;
 }
 
 /// Bounding box of the right child
-static inline AABB GetChildBoxRight(const BVHNodeFat& node)
+static inline Box4f GetChildBoxRight(const BVHNodeFat& node)
 {
-  AABB box;
-  box.mn = LiteMath::to_float3(node.rmin_xyz_rmax_z);
-  box.mx = LiteMath::float3(node.lmin_xyz_rmax_x.w, node.lmax_xyz_rmax_y.w, node.rmin_xyz_rmax_z.w);
+  Box4f box;
+  box.boxMin = float4(node.rmin_xyz_rmax_z.x, node.rmin_xyz_rmax_z.y, node.rmin_xyz_rmax_z.z, 1.0f);
+  box.boxMax = float4(node.lmin_xyz_rmax_x.w, node.lmax_xyz_rmax_y.w, node.rmin_xyz_rmax_z.w, 1.0f);
   return box;
 }
 
