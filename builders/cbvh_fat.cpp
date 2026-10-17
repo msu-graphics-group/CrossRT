@@ -461,9 +461,9 @@ cbvh2::BVHTreeFat16 cbvh2::BuildBVHFat16(const float* a_vpos3f, size_t a_vertNum
 
     BVHNodeFat16 node16;
     {
-      node16.lmin_xyz_rmax_x = half4(roundToNeg(leftBox.mn.x),  roundToNeg(leftBox.mn.y),  roundToNeg(leftBox.mn.z),  roundToPos(rightBox.mx.x));
-      node16.lmax_xyz_rmax_y = half4(roundToPos(leftBox.mx.x),  roundToPos(leftBox.mx.y),  roundToPos(leftBox.mx.z),  roundToPos(rightBox.mx.y));
-      node16.rmin_xyz_rmax_z = half4(roundToNeg(rightBox.mn.x), roundToNeg(rightBox.mn.y), roundToNeg(rightBox.mn.z), roundToPos(rightBox.mx.z));
+      node16.lmin_xyz_rmax_x = half4(roundToNeg(leftBox.boxMin.x),  roundToNeg(leftBox.boxMin.y),  roundToNeg(leftBox.boxMin.z),  roundToPos(rightBox.boxMax.x));
+      node16.lmax_xyz_rmax_y = half4(roundToPos(leftBox.boxMax.x),  roundToPos(leftBox.boxMax.y),  roundToPos(leftBox.boxMax.z),  roundToPos(rightBox.boxMax.y));
+      node16.rmin_xyz_rmax_z = half4(roundToNeg(rightBox.boxMin.x), roundToNeg(rightBox.boxMin.y), roundToNeg(rightBox.boxMin.z), roundToPos(rightBox.boxMax.z));
       node16.offs_left       = node.offs_left;
       node16.offs_right      = node.offs_right;
     }
