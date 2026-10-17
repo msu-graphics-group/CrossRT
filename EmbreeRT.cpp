@@ -7,10 +7,12 @@
 #include "CrossRT.h"
 #include "embree3/rtcore.h"
 
+using LiteMath::Box4f;
+
 class EmbreeRT : public ISceneObject
 {
 public:
-  EmbreeRT();
+  EmbreeRT(bool a_storeBoxes = true);
   ~EmbreeRT();
   void ClearGeom() override;
   const char* Name() const override { return "VulkanRTX"; }
@@ -31,8 +33,21 @@ public:
   bool     RayQuery_AnyHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) override;
   CRT_Hit  RayQuery_NearestHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time) override;
   bool     RayQuery_AnyHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time) override;
+  
+  ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  const Box4f* GetGeomBoxes() override { return m_geomBoxes.data(); }            /// array  of added geometry objects
+  uint32_t     GetGeomNum()   override { return uint32_t(m_geomBoxes.size()); }  /// number of added geometry objects
+  
+  const Box4f* GetInstBoxes() override { return m_instBoxes.data(); }           /// array  of instances
+  uint32_t     GetInstNum()   override { return uint32_t(m_instBoxes.size()); } /// number of instances
+  
+  CRT_AABB  GetSceneBoundingBox() const override { return m_sceneBBox; }
+  ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 protected:
+  
+  Box4f TransformBox(const LiteMath::float4x4& a_matrix, const LiteMath::Box4f& box);
+
   uint32_t maxFrames = 1;
   RTCDevice m_device = nullptr;
   RTCScene  m_scene  = nullptr;
@@ -48,7 +63,16 @@ protected:
   std::vector<BlasInfo>    m_blasInfo;
   std::vector<RTCGeometry> m_inst;
   std::vector<uint32_t>    m_geomIdByInstId;
+  
+  // optionally compute and store boxes
+  //
+  bool m_storeGeomBoxes;          // use false if you don't need get boxes
+  std::vector<Box4f> m_geomBoxes; // use boxMin.w as geomSize and boxMin.w as geomTag
+  std::vector<Box4f> m_instBoxes;
+
+  CRT_AABB m_sceneBBox;
 };
+
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -101,9 +125,9 @@ void error_handler(void* userPtr, const RTCError code, const char* str)
 }
 
 
-EmbreeRT::EmbreeRT()
+EmbreeRT::EmbreeRT(bool a_storeBoxes)
 {
-  m_device = rtcNewDevice("isa=avx2");
+  m_device = rtcNewDevice("");
   m_scene  = nullptr;
   
   rtcSetDeviceErrorFunction(m_device, error_handler, nullptr);
@@ -111,12 +135,21 @@ EmbreeRT::EmbreeRT()
   m_blasInfo.reserve(m_blas.capacity());
   m_inst.reserve(2048);
   m_geomIdByInstId.reserve(m_inst.capacity());
+  
+  m_storeGeomBoxes = a_storeBoxes;
+  if(m_storeGeomBoxes)
+  {
+    m_geomBoxes.reserve(m_blas.capacity());
+    m_instBoxes.reserve(m_inst.capacity());
+  }
 }
 
 EmbreeRT::~EmbreeRT()
 {
-  rtcReleaseScene(m_scene);
-  rtcReleaseDevice(m_device);
+  if(m_scene != nullptr)
+    rtcReleaseScene(m_scene);
+  if (m_device != nullptr)
+    rtcReleaseDevice(m_device);
 }
 
 void EmbreeRT::ClearGeom()
@@ -132,6 +165,7 @@ void EmbreeRT::ClearGeom()
   m_inst.resize(0);
   m_geomIdByInstId.resize(0);
   m_blasInfo.resize(0);
+  m_geomBoxes.resize(0);
 }
   
 
@@ -166,6 +200,21 @@ uint32_t EmbreeRT::AddGeom_Triangles3f(const float* a_vpos3f, size_t a_vertNumbe
   
   memcpy(vertices, a_vpos3f, a_vertNumber*vByteStride);
   memcpy(indices, a_triIndices, a_indNumber*sizeof(unsigned));
+  
+  // eval geom bounding box
+  if(m_storeGeomBoxes)
+  {
+    LiteMath::Box4f bbox;
+    const size_t vStride = vByteStride / 4;
+    for (size_t i = 0; i < a_vertNumber; i++)
+    {
+      const float4 v = float4(a_vpos3f[i * vStride + 0], a_vpos3f[i * vStride + 1], a_vpos3f[i * vStride + 2], 1.0f);
+      bbox.include(v);
+    }
+    bbox.boxMin.w = LiteMath::as_float(uint32_t(a_indNumber/3)); // store 'm_geomSize[geomId]';
+    bbox.boxMax.w = LiteMath::as_float(0);      // store 'm_geomTags[geomId]'; Triangles are always have zero tag, GEOM_TYPE_TRIANGLE == 0
+    m_geomBoxes.push_back(bbox);
+  }
 
   rtcCommitGeometry(geom);
 
@@ -226,18 +275,61 @@ void EmbreeRT::UpdateGeom_Triangles3f(uint32_t a_geomId, const float* a_vpos3f, 
   memcpy(vertices, a_vpos3f, a_vertNumber*vByteStride);
   memcpy(indices, a_triIndices, a_indNumber*sizeof(unsigned));
 
+  if(m_storeGeomBoxes)
+  {
+    LiteMath::Box4f bbox;
+    const size_t vStride = vByteStride / 4;
+    for (size_t i = 0; i < a_vertNumber; i++)
+    {
+      const float4 v = float4(a_vpos3f[i * vStride + 0], a_vpos3f[i * vStride + 1], a_vpos3f[i * vStride + 2], 1.0f);
+      bbox.include(v);
+    }
+    bbox.boxMin.w = LiteMath::as_float(uint32_t(a_indNumber/3)); // store 'm_geomSize[geomId]';
+    bbox.boxMax.w = LiteMath::as_float(0);                       // store 'm_geomTags[geomId]'; Triangles are always have zero tag, GEOM_TYPE_TRIANGLE == 0
+    m_geomBoxes[a_geomId] = bbox;
+  }
+
   rtcUpdateGeometryBuffer(mesh, RTC_BUFFER_TYPE_VERTEX, 0);
   rtcCommitGeometry(mesh);
 }
 
 void EmbreeRT::ClearScene()
 {
-  m_inst.resize(0);
   if(m_scene != nullptr)
     rtcReleaseScene(m_scene);
   m_scene = rtcNewScene(m_device);
   rtcSetSceneBuildQuality(m_scene, RTC_BUILD_QUALITY_MEDIUM);
+
+  m_inst.resize(0);
+  m_geomIdByInstId.resize(0);
+  m_instBoxes.resize(0);
+  m_sceneBBox = CRT_AABB();
 } 
+
+Box4f EmbreeRT::TransformBox(const LiteMath::float4x4& a_matrix, const LiteMath::Box4f& box)
+{
+  // (1) mult mesh bounding box vertices with matrix to form new bouding box for instance
+  float4 boxVertices[8]{
+      a_matrix * float4{box.boxMin.x, box.boxMin.y, box.boxMin.z, 1.0f},
+
+      a_matrix * float4{box.boxMax.x, box.boxMin.y, box.boxMin.z, 1.0f},
+      a_matrix * float4{box.boxMin.x, box.boxMax.y, box.boxMin.z, 1.0f},
+      a_matrix * float4{box.boxMin.x, box.boxMin.y, box.boxMax.z, 1.0f},
+
+      a_matrix * float4{box.boxMax.x, box.boxMax.y, box.boxMin.z, 1.0f},
+      a_matrix * float4{box.boxMax.x, box.boxMin.y, box.boxMax.z, 1.0f},
+      a_matrix * float4{box.boxMin.x, box.boxMax.y, box.boxMax.z, 1.0f},
+
+      a_matrix * float4{box.boxMax.x, box.boxMax.y, box.boxMax.z, 1.0f},
+  };
+  
+  // (2) grow new box around transformed vertices
+  Box4f newBox;
+  for (size_t i = 0; i < 8; i++)
+    newBox.include(boxVertices[i]);
+
+  return newBox;
+}
 
 uint32_t EmbreeRT::AddInstance(uint32_t a_geomId, const LiteMath::float4x4& a_matrix)
 {
@@ -256,6 +348,12 @@ uint32_t EmbreeRT::AddInstance(uint32_t a_geomId, const LiteMath::float4x4& a_ma
   rtcSetGeometryTransform(instanceGeom, 0, RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR, (const float*)&a_matrix);
   rtcCommitGeometry(instanceGeom);
   
+  const auto tBox = TransformBox(a_matrix, m_geomBoxes[a_geomId]);
+  m_sceneBBox.include(tBox);
+
+  if(m_storeGeomBoxes)
+    m_instBoxes.push_back(tBox);
+
   m_inst.push_back(instanceGeom);
   m_geomIdByInstId.push_back(a_geomId);
   return uint32_t(m_inst.size()-1);
@@ -270,7 +368,6 @@ uint32_t EmbreeRT::AddInstanceMotion(uint32_t a_geomId, const LiteMath::float4x4
   rtcSetGeometryInstancedScene(instanceGeom, m_blas[a_geomId]);                   // say that 'instanceGeom' is an instance of 'm_blas[a_geomId]'
   rtcSetGeometryTimeStepCount(instanceGeom, a_matrixNumber); 
 
-
   rtcAttachGeometry(m_scene,instanceGeom);                                        // attach our instance to global scene 
   rtcReleaseGeometry(instanceGeom);
   
@@ -283,9 +380,18 @@ uint32_t EmbreeRT::AddInstanceMotion(uint32_t a_geomId, const LiteMath::float4x4
 
   rtcCommitGeometry(instanceGeom);
   
+  auto tBox = TransformBox(a_matrices[0], m_geomBoxes[a_geomId]);  
+  m_sceneBBox.include(tBox);
+  for (uint32_t t = 1; t < a_matrixNumber; ++t) {
+    auto boxNew = TransformBox(a_matrices[t], m_geomBoxes[a_geomId]);  
+    tBox.include(boxNew);
+  }
+
+  if(m_storeGeomBoxes)   
+    m_instBoxes.push_back(tBox);
+
   m_inst.push_back(instanceGeom);
   m_geomIdByInstId.push_back(a_geomId);
-
   maxFrames = std::max(maxFrames, a_matrixNumber);
 
   return uint32_t(m_inst.size()-1);
@@ -302,6 +408,12 @@ void  EmbreeRT::UpdateInstance(uint32_t a_instanceId, const LiteMath::float4x4& 
 {
   if(a_instanceId >= m_inst.size())
     return;
+
+  if(m_storeGeomBoxes)  
+  { 
+    const auto geomId = m_geomIdByInstId[a_instanceId];
+    m_instBoxes[a_instanceId] = TransformBox(a_matrix, m_geomBoxes[geomId]);
+  }
 
   rtcSetGeometryTransform(m_inst[a_instanceId], 0, RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR, (const float*)&a_matrix);
   rtcCommitGeometry(m_inst[a_instanceId]);
@@ -419,7 +531,7 @@ CRT_Hit  EmbreeRT::RayQuery_NearestHitMotion(LiteMath::float4 posAndNear, LiteMa
   // input time is in [0, 1], while in Embree 0 is the first frame, 1 is the second, 2 - third etc.
   // therefore we multiply time with the maximum animation length
   // although instances with fewer frames set will actually continue moving
-  rayhit.ray.time = time * (maxFrames - 1);
+  rayhit.ray.time = time * float(maxFrames - 1);
 
   rayhit.ray.mask   = -1;
   rayhit.ray.flags  = 0;
@@ -476,7 +588,7 @@ bool EmbreeRT::RayQuery_AnyHitMotion(LiteMath::float4 posAndNear, LiteMath::floa
   ray.dir_z = dirAndFar.z;
   ray.tfar  = dirAndFar.w; // std::numeric_limits<float>::infinity();
 
-  ray.time  = time * (maxFrames - 1);
+  ray.time  = time * float(maxFrames - 1);
 
   rtcOccluded1(m_scene, &context, &ray);  
 
@@ -485,6 +597,6 @@ bool EmbreeRT::RayQuery_AnyHitMotion(LiteMath::float4 posAndNear, LiteMath::floa
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-ISceneObject* CreateEmbreeRT() { return new EmbreeRT; }
-ISceneObject* CreateSceneRT(const char* a_impleName)  {  return CreateEmbreeRT(); }
-void DeleteSceneRT(ISceneObject* a_pScene)  { delete a_pScene; }
+ISceneObject* CreateEmbreeRT(const char* a_implName = "") { return new EmbreeRT; }
+//ISceneObject* CreateSceneRT(const char* a_implName)  {  return CreateEmbreeRT(); }
+//void DeleteSceneRT(ISceneObject* a_pScene)  { delete a_pScene; }

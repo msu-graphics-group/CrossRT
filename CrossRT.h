@@ -4,6 +4,7 @@
 #include <cstddef>
 #include "LiteMath.h"
 using LiteMath::float4;
+using CRT_AABB = LiteMath::Box4f;
 
 enum BuildOptions 
 {
@@ -33,11 +34,6 @@ struct CRT_Hit
 static constexpr unsigned int CRT_GEOM_MASK_AABB_BIT    = 0x80000000; // 1000 0000 ... 
 static constexpr unsigned int CRT_GEOM_MASK_AABB_BIT_RM = 0x7fffffff; // 0111 1111 ... 
 
-struct CRT_AABB
-{
-  float4 boxMin;
-  float4 boxMax;
-};
 
 /**
 \brief API to ray-scene intersection on CPU
@@ -172,8 +168,20 @@ struct ISceneObject
   \return             - true if a hit is found, false otherwaise
   */
   virtual bool    RayQuery_AnyHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time = 0.0f) = 0;
+  
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  
+  virtual const CRT_AABB* GetGeomBoxes() { return nullptr; }  /// array  of added geometry objects
+  virtual       uint32_t  GetGeomNum()   { return 0; }        /// number of added geometry objects
+  
+  virtual const CRT_AABB* GetInstBoxes() { return nullptr; }  /// array  of instances
+  virtual       uint32_t  GetInstNum()   { return 0; }        /// number of instances
 
+  virtual       CRT_AABB  GetSceneBoundingBox() const { return CRT_AABB{}; }
+
+protected:
 };
+
 
 /**
 \brief 'fixed-function' intersection data which is passed to custom intersection function
@@ -187,10 +195,6 @@ struct CRT_LeafInfo
   uint32_t rayxId; ///<! unique ray id (x coord on image)
   uint32_t rayyId; ///<! unique ray id (y coord on image)
 };
-
-
-ISceneObject* CreateEmbreeRT();
-//ISceneObject* CreateVulkanRTX(VkDevice a_device, VkPhysicalDevice a_physDevice, uint32_t a_transferQId, uint32_t a_graphicsQId);
 
 ISceneObject* CreateSceneRT(const char* a_impleName); 
 void          DeleteSceneRT(ISceneObject* a_pScene);

@@ -1,0 +1,581 @@
+#include <iostream>
+#include <vector>
+#include <unordered_map>
+#include <cassert>
+#include <algorithm>
+
+#include "CrossRT.h"
+#include "embree4/rtcore.h"
+
+using LiteMath::Box4f;
+
+class EmbreeRT4 : public ISceneObject
+{
+public:
+  EmbreeRT4(bool a_storeBoxes = true);
+  ~EmbreeRT4();
+  void ClearGeom() override;
+  const char* Name() const override { return "EmbreeRT4"; }
+
+  uint32_t AddGeom_Triangles3f(const float * a_vpos3f, size_t a_vertNumber, const uint32_t* a_triIndices, size_t a_indNumber, 
+                               uint32_t a_flags, size_t vByteStride) override;
+  void     UpdateGeom_Triangles3f(uint32_t a_geomId, const float* a_vpos3f, size_t a_vertNumber, const uint32_t* a_triIndices,
+                                  size_t a_indNumber, uint32_t a_flags, size_t vByteStride) override;
+
+  void ClearScene() override; 
+  void CommitScene  (uint32_t options = BUILD_HIGH) override; 
+  
+  uint32_t AddInstance(uint32_t a_geomId, const LiteMath::float4x4& a_matrix) override;
+  uint32_t AddInstanceMotion(uint32_t a_geomId, const LiteMath::float4x4* a_matrices, uint32_t a_matrixNumber) override;
+  void     UpdateInstance(uint32_t a_instanceId, const LiteMath::float4x4& a_matrix) override;
+
+  CRT_Hit  RayQuery_NearestHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) override;
+  bool     RayQuery_AnyHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar) override;
+  CRT_Hit  RayQuery_NearestHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time) override;
+  bool     RayQuery_AnyHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time) override;
+  
+  ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  const Box4f* GetGeomBoxes() override { return m_geomBoxes.data(); }            /// array  of added geometry objects
+  uint32_t     GetGeomNum()   override { return uint32_t(m_geomBoxes.size()); }  /// number of added geometry objects
+  
+  const Box4f* GetInstBoxes() override { return m_instBoxes.data(); }           /// array  of instances
+  uint32_t     GetInstNum()   override { return uint32_t(m_instBoxes.size()); } /// number of instances
+  
+  CRT_AABB  GetSceneBoundingBox() const override { return m_sceneBBox; }
+  ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+protected:
+  
+  Box4f TransformBox(const LiteMath::float4x4& a_matrix, const LiteMath::Box4f& box);
+
+  uint32_t maxFrames = 1;
+  RTCDevice m_device = nullptr;
+  RTCScene  m_scene  = nullptr;
+
+  struct BlasInfo
+  {
+    size_t verticesNum = 0;
+    size_t indicesNum  = 0;
+    size_t vByteStride = 0;
+  };
+
+  std::vector<RTCScene>    m_blas;
+  std::vector<BlasInfo>    m_blasInfo;
+  std::vector<RTCGeometry> m_inst;
+  std::vector<uint32_t>    m_geomIdByInstId;
+  
+  // optionally compute and store boxes
+  //
+  bool m_storeGeomBoxes;          // use false if you don't need get boxes
+  std::vector<Box4f> m_geomBoxes; // use boxMin.w as geomSize and boxMin.w as geomTag
+  std::vector<Box4f> m_instBoxes;
+
+  CRT_AABB m_sceneBBox;
+};
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+enum RTCBuildQuality TransformBuildQ(uint32_t a_flags)
+{
+  if(a_flags & BUILD_LOW)
+  {
+    return RTC_BUILD_QUALITY_LOW;
+  }
+  else if(a_flags & BUILD_MEDIUM)
+  {
+    return RTC_BUILD_QUALITY_MEDIUM;
+  }
+  else if(a_flags & BUILD_HIGH)
+  {
+    return RTC_BUILD_QUALITY_HIGH;
+  }
+  else if(a_flags & BUILD_REFIT)
+  {
+    return RTC_BUILD_QUALITY_REFIT;
+  }
+
+  return RTC_BUILD_QUALITY_MEDIUM;
+}
+
+void error_handler(void* userPtr, const RTCError code, const char* str)
+{
+  if (code == RTC_ERROR_NONE)
+    return;
+  
+  std::cout << ("Embree: ");
+  switch (code) {
+  case RTC_ERROR_UNKNOWN          : std::cout << "RTC_ERROR_UNKNOWN"; break;
+  case RTC_ERROR_INVALID_ARGUMENT : std::cout << "RTC_ERROR_INVALID_ARGUMENT"; break;
+  case RTC_ERROR_INVALID_OPERATION: std::cout << "RTC_ERROR_INVALID_OPERATION"; break;
+  case RTC_ERROR_OUT_OF_MEMORY    : std::cout << "RTC_ERROR_OUT_OF_MEMORY"; break;
+  case RTC_ERROR_UNSUPPORTED_CPU  : std::cout << "RTC_ERROR_UNSUPPORTED_CPU"; break;
+  case RTC_ERROR_CANCELLED        : std::cout << "RTC_ERROR_CANCELLED"; break;
+  case RTC_ERROR_LEVEL_ZERO_RAYTRACING_SUPPORT_MISSING: std::cout << "RTC_ERROR_LEVEL_ZERO_RAYTRACING_SUPPORT_MISSING"; break;
+  default                         : std::cout << "invalid error code"; break;
+  }
+  if (str) {
+    std::cout << " (";
+    while (*str) std::cout << (*str++);
+    std::cout << ")\n";
+  }
+  exit(1);
+}
+
+
+EmbreeRT4::EmbreeRT4(bool a_storeBoxes)
+{
+  m_device = rtcNewDevice("");
+  m_scene  = nullptr;
+  
+  rtcSetDeviceErrorFunction(m_device, error_handler, nullptr);
+  m_blas.reserve(1024);
+  m_blasInfo.reserve(m_blas.capacity());
+  m_inst.reserve(2048);
+  m_geomIdByInstId.reserve(m_inst.capacity());
+  
+  m_storeGeomBoxes = a_storeBoxes;
+  if(m_storeGeomBoxes)
+  {
+    m_geomBoxes.reserve(m_blas.capacity());
+    m_instBoxes.reserve(m_inst.capacity());
+  }
+}
+
+EmbreeRT4::~EmbreeRT4()
+{
+  if(m_scene != nullptr)
+    rtcReleaseScene(m_scene);
+  if (m_device != nullptr)
+    rtcReleaseDevice(m_device);
+}
+
+void EmbreeRT4::ClearGeom()
+{
+  for(auto& scn : m_blas)
+    rtcReleaseScene(scn);
+  
+  if(m_scene != nullptr)
+    rtcReleaseScene(m_scene);
+  m_scene = rtcNewScene(m_device);
+
+  m_blas.resize(0);
+  m_inst.resize(0);
+  m_geomIdByInstId.resize(0);
+  m_blasInfo.resize(0);
+  m_geomBoxes.resize(0);
+}
+  
+
+uint32_t EmbreeRT4::AddGeom_Triangles3f(const float* a_vpos3f, size_t a_vertNumber, const uint32_t* a_triIndices, size_t a_indNumber,
+                                       uint32_t a_flags, size_t vByteStride)
+{
+  if(vByteStride == 0)
+    vByteStride = sizeof(float)*3;
+
+  if(vByteStride % sizeof(float) != 0)
+  {
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f; bat vByteStride; it should be multiple of sizeof(float)" << std::endl;  
+    return uint32_t(-1);
+  }
+
+  if(a_vpos3f == nullptr)
+  {
+    std::cout << "[EmbreeRT4]::AddGeom_Triangles3f, nullptr input: a_vpos3f" << std::endl;
+    return uint32_t(-1);
+  }
+
+  if(a_triIndices == nullptr)
+  {
+    std::cout << "[EmbreeRT4]::AddGeom_Triangles3f, nullptr input: a_triIndices" << std::endl;
+    return uint32_t(-1);
+  }
+
+  RTCGeometry geom = rtcNewGeometry(m_device, RTC_GEOMETRY_TYPE_TRIANGLE);
+
+  float* vertices   = (float*)    rtcSetNewGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, vByteStride,        a_vertNumber);
+  unsigned* indices = (unsigned*) rtcSetNewGeometryBuffer(geom, RTC_BUFFER_TYPE_INDEX,  0, RTC_FORMAT_UINT3,  3*sizeof(unsigned), a_indNumber/3);
+  
+  memcpy(vertices, a_vpos3f, a_vertNumber*vByteStride);
+  memcpy(indices, a_triIndices, a_indNumber*sizeof(unsigned));
+  
+  // eval geom bounding box
+  if(m_storeGeomBoxes)
+  {
+    LiteMath::Box4f bbox;
+    const size_t vStride = vByteStride / 4;
+    for (size_t i = 0; i < a_vertNumber; i++)
+    {
+      const float4 v = float4(a_vpos3f[i * vStride + 0], a_vpos3f[i * vStride + 1], a_vpos3f[i * vStride + 2], 1.0f);
+      bbox.include(v);
+    }
+    bbox.boxMin.w = LiteMath::as_float(uint32_t(a_indNumber/3)); // store 'm_geomSize[geomId]';
+    bbox.boxMax.w = LiteMath::as_float(0);      // store 'm_geomTags[geomId]'; Triangles are always have zero tag, GEOM_TYPE_TRIANGLE == 0
+    m_geomBoxes.push_back(bbox);
+  }
+
+  rtcCommitGeometry(geom);
+
+  // attach 'geom' to 'meshScene' and then remember 'meshScene' in 'm_blas'
+  //
+  auto meshScene = rtcNewScene(m_device);
+  rtcSetSceneBuildQuality(meshScene, TransformBuildQ(a_flags));
+  
+  /*uint32_t geomId = */
+  rtcAttachGeometry(meshScene, geom);
+  rtcReleaseGeometry(geom);
+  m_blas.push_back(meshScene);
+
+  BlasInfo info;
+  info.indicesNum  = a_indNumber;
+  info.verticesNum = a_vertNumber;
+  info.vByteStride = vByteStride;
+  m_blasInfo.push_back(info);
+
+  rtcCommitScene(meshScene);
+  return uint32_t(m_blas.size()-1);
+}
+
+void EmbreeRT4::UpdateGeom_Triangles3f(uint32_t a_geomId, const float* a_vpos3f, size_t a_vertNumber, const uint32_t* a_triIndices, size_t a_indNumber,
+                                      uint32_t a_flags, size_t vByteStride)
+{
+  //std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f is not implemented yet!" << std::endl;  
+  //return;
+  if(a_geomId >= m_blas.size())
+  {
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f, nullptr input: a_triIndices" << std::endl;
+    return;
+  }
+  auto meshInfo = m_blasInfo[a_geomId];
+  if(a_indNumber > meshInfo.indicesNum)
+  {
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f, can't resize 'index buffer', this is not supported" << std::endl;
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f, old size = " << meshInfo.indicesNum << ", new size = " << a_indNumber << std::endl;
+    return;
+  }
+  if(a_vertNumber > meshInfo.verticesNum)
+  {
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f, can't resize 'vertex buffer', this is not supported" << std::endl;
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f, old size = " << meshInfo.verticesNum << ", new size = " << a_vertNumber << std::endl;
+    return;
+  }
+  if(vByteStride != meshInfo.vByteStride)
+  {
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f, can't change stride for 'vertex buffer', this is not supported by 'EmbreeRT4' impl;" << std::endl;
+    std::cout << "[EmbreeRT4]::UpdateGeom_Triangles3f, old stride = " << meshInfo.vByteStride << ", new stride = " << vByteStride << std::endl;
+    return;
+  }
+
+  auto mesh      = rtcGetGeometry(m_blas[a_geomId], 0);
+  auto* vertices = rtcGetGeometryBufferData(mesh, RTC_BUFFER_TYPE_VERTEX, 0);
+  auto* indices  = rtcGetGeometryBufferData(mesh, RTC_BUFFER_TYPE_INDEX,  0);
+
+  memcpy(vertices, a_vpos3f, a_vertNumber*vByteStride);
+  memcpy(indices, a_triIndices, a_indNumber*sizeof(unsigned));
+
+  if(m_storeGeomBoxes)
+  {
+    LiteMath::Box4f bbox;
+    const size_t vStride = vByteStride / 4;
+    for (size_t i = 0; i < a_vertNumber; i++)
+    {
+      const float4 v = float4(a_vpos3f[i * vStride + 0], a_vpos3f[i * vStride + 1], a_vpos3f[i * vStride + 2], 1.0f);
+      bbox.include(v);
+    }
+    bbox.boxMin.w = LiteMath::as_float(uint32_t(a_indNumber/3)); // store 'm_geomSize[geomId]';
+    bbox.boxMax.w = LiteMath::as_float(0);                       // store 'm_geomTags[geomId]'; Triangles are always have zero tag, GEOM_TYPE_TRIANGLE == 0
+    m_geomBoxes[a_geomId] = bbox;
+  }
+
+  rtcUpdateGeometryBuffer(mesh, RTC_BUFFER_TYPE_VERTEX, 0);
+  rtcCommitGeometry(mesh);
+}
+
+void EmbreeRT4::ClearScene()
+{
+  if(m_scene != nullptr)
+    rtcReleaseScene(m_scene);
+  m_scene = rtcNewScene(m_device);
+  rtcSetSceneBuildQuality(m_scene, RTC_BUILD_QUALITY_MEDIUM);
+
+  m_inst.resize(0);
+  m_geomIdByInstId.resize(0);
+  m_instBoxes.resize(0);
+  m_sceneBBox = CRT_AABB();
+} 
+
+Box4f EmbreeRT4::TransformBox(const LiteMath::float4x4& a_matrix, const LiteMath::Box4f& box)
+{
+  // (1) mult mesh bounding box vertices with matrix to form new bouding box for instance
+  float4 boxVertices[8]{
+      a_matrix * float4{box.boxMin.x, box.boxMin.y, box.boxMin.z, 1.0f},
+
+      a_matrix * float4{box.boxMax.x, box.boxMin.y, box.boxMin.z, 1.0f},
+      a_matrix * float4{box.boxMin.x, box.boxMax.y, box.boxMin.z, 1.0f},
+      a_matrix * float4{box.boxMin.x, box.boxMin.y, box.boxMax.z, 1.0f},
+
+      a_matrix * float4{box.boxMax.x, box.boxMax.y, box.boxMin.z, 1.0f},
+      a_matrix * float4{box.boxMax.x, box.boxMin.y, box.boxMax.z, 1.0f},
+      a_matrix * float4{box.boxMin.x, box.boxMax.y, box.boxMax.z, 1.0f},
+
+      a_matrix * float4{box.boxMax.x, box.boxMax.y, box.boxMax.z, 1.0f},
+  };
+  
+  // (2) grow new box around transformed vertices
+  Box4f newBox;
+  for (size_t i = 0; i < 8; i++)
+    newBox.include(boxVertices[i]);
+
+  return newBox;
+}
+
+uint32_t EmbreeRT4::AddInstance(uint32_t a_geomId, const LiteMath::float4x4& a_matrix)
+{
+  if(a_geomId >= m_blas.size())
+    return uint32_t(-1);
+
+  RTCGeometry instanceGeom = rtcNewGeometry(m_device, RTC_GEOMETRY_TYPE_INSTANCE);
+  rtcSetGeometryInstancedScene(instanceGeom, m_blas[a_geomId]);                   // say that 'instanceGeom' is an instance of 'm_blas[a_geomId]'
+  //rtcSetGeometryTimeStepCount(instanceGeom, 1);                                 // don't know wtf is that
+  
+  rtcAttachGeometry(m_scene,instanceGeom);                                        // attach our instance to global scene 
+  rtcReleaseGeometry(instanceGeom);
+  
+  // update instance matrix
+  //
+  rtcSetGeometryTransform(instanceGeom, 0, RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR, (const float*)&a_matrix);
+  rtcCommitGeometry(instanceGeom);
+  
+  const auto tBox = TransformBox(a_matrix, m_geomBoxes[a_geomId]);
+  m_sceneBBox.include(tBox);
+
+  if(m_storeGeomBoxes)
+    m_instBoxes.push_back(tBox);
+
+  m_inst.push_back(instanceGeom);
+  m_geomIdByInstId.push_back(a_geomId);
+  return uint32_t(m_inst.size()-1);
+}
+
+uint32_t EmbreeRT4::AddInstanceMotion(uint32_t a_geomId, const LiteMath::float4x4* a_matrices, uint32_t a_matrixNumber)
+{
+ if(a_geomId >= m_blas.size())
+    return uint32_t(-1);
+
+  RTCGeometry instanceGeom = rtcNewGeometry(m_device, RTC_GEOMETRY_TYPE_INSTANCE);
+  rtcSetGeometryInstancedScene(instanceGeom, m_blas[a_geomId]);                   // say that 'instanceGeom' is an instance of 'm_blas[a_geomId]'
+  rtcSetGeometryTimeStepCount(instanceGeom, a_matrixNumber); 
+
+  rtcAttachGeometry(m_scene,instanceGeom);                                        // attach our instance to global scene 
+  rtcReleaseGeometry(instanceGeom);
+  
+  // update instance matrix
+  //
+  for (uint32_t t = 0; t < a_matrixNumber; ++t)
+  {
+    rtcSetGeometryTransform(instanceGeom, t, RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR, (const float*)&a_matrices[t]);  
+  }
+
+  rtcCommitGeometry(instanceGeom);
+  
+  auto tBox = TransformBox(a_matrices[0], m_geomBoxes[a_geomId]);  
+  m_sceneBBox.include(tBox);
+  for (uint32_t t = 1; t < a_matrixNumber; ++t) {
+    auto boxNew = TransformBox(a_matrices[t], m_geomBoxes[a_geomId]);  
+    tBox.include(boxNew);
+  }
+
+  if(m_storeGeomBoxes)   
+    m_instBoxes.push_back(tBox);
+
+  m_inst.push_back(instanceGeom);
+  m_geomIdByInstId.push_back(a_geomId);
+  maxFrames = std::max(maxFrames, a_matrixNumber);
+
+  return uint32_t(m_inst.size()-1);
+}
+
+void EmbreeRT4::CommitScene(uint32_t options)
+{
+  rtcSetSceneBuildQuality(m_scene, TransformBuildQ(options));
+  rtcCommitScene(m_scene);
+}  
+
+
+void  EmbreeRT4::UpdateInstance(uint32_t a_instanceId, const LiteMath::float4x4& a_matrix)
+{
+  if(a_instanceId >= m_inst.size())
+    return;
+
+  if(m_storeGeomBoxes)  
+  { 
+    const auto geomId = m_geomIdByInstId[a_instanceId];
+    m_instBoxes[a_instanceId] = TransformBox(a_matrix, m_geomBoxes[geomId]);
+  }
+
+  rtcSetGeometryTransform(m_inst[a_instanceId], 0, RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR, (const float*)&a_matrix);
+  rtcCommitGeometry(m_inst[a_instanceId]);
+}
+
+CRT_Hit  EmbreeRT4::RayQuery_NearestHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar)
+{    
+  // The ray hit structure holds both the ray and the hit.
+  // The user must initialize it properly -- see API documentation
+  // for rtcIntersect1() for details.
+  //  
+  struct RTCRayHit rayhit;
+  rayhit.ray.org_x = posAndNear.x;
+  rayhit.ray.org_y = posAndNear.y;
+  rayhit.ray.org_z = posAndNear.z;
+  rayhit.ray.tnear = posAndNear.w;
+
+  rayhit.ray.dir_x = dirAndFar.x;
+  rayhit.ray.dir_y = dirAndFar.y;
+  rayhit.ray.dir_z = dirAndFar.z;
+  rayhit.ray.tfar  = dirAndFar.w; // std::numeric_limits<float>::infinity();
+  rayhit.ray.time  = 0.0f;
+
+  rayhit.ray.mask   = -1;
+  rayhit.ray.flags  = 0;
+  rayhit.hit.geomID    = RTC_INVALID_GEOMETRY_ID;
+  rayhit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
+
+  // There are multiple variants of rtcIntersect. This one intersects a single ray with the scene.
+  // 
+  rtcIntersect1(m_scene, &rayhit);
+
+  CRT_Hit result;
+  if(rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID)
+  {
+    result.t      = rayhit.ray.tfar;
+    result.geomId = m_geomIdByInstId[rayhit.hit.instID[0]];
+    result.instId = rayhit.hit.instID[0];
+    result.primId = rayhit.hit.primID;
+    result.coords[1] = rayhit.hit.u;
+    result.coords[0] = rayhit.hit.v;
+    result.coords[2] = 1.0f - rayhit.hit.v - rayhit.hit.u;
+  }
+  else
+  {
+    result.t      = rayhit.ray.tfar;
+    result.geomId = uint32_t(-1);
+    result.instId = uint32_t(-1);
+    result.primId = uint32_t(-1);
+  }
+
+  return result;
+}
+
+bool EmbreeRT4::RayQuery_AnyHit(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar)
+{
+  // The ray hit structure holds both the ray and the hit.
+  // The user must initialize it properly -- see API documentation
+  // for rtcIntersect1() for details.
+  //  
+  struct RTCRay ray;
+  ray.org_x = posAndNear.x;
+  ray.org_y = posAndNear.y;
+  ray.org_z = posAndNear.z;
+  ray.tnear = posAndNear.w;
+
+  ray.dir_x = dirAndFar.x;
+  ray.dir_y = dirAndFar.y;
+  ray.dir_z = dirAndFar.z;
+  ray.tfar  = dirAndFar.w; // std::numeric_limits<float>::infinity();
+  ray.time  = 0.0f;
+  ray.mask  = -1;
+  ray.flags = 0;
+
+  rtcOccluded1(m_scene, &ray);  
+
+  return (ray.tfar < 0.0f);
+}
+
+CRT_Hit  EmbreeRT4::RayQuery_NearestHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time)
+{    
+  // The ray hit structure holds both the ray and the hit.
+  // The user must initialize it properly -- see API documentation
+  // for rtcIntersect1() for details.
+  //  
+  struct RTCRayHit rayhit;
+  rayhit.ray.org_x = posAndNear.x;
+  rayhit.ray.org_y = posAndNear.y;
+  rayhit.ray.org_z = posAndNear.z;
+  rayhit.ray.tnear = posAndNear.w;
+
+  rayhit.ray.dir_x = dirAndFar.x;
+  rayhit.ray.dir_y = dirAndFar.y;
+  rayhit.ray.dir_z = dirAndFar.z;
+  rayhit.ray.tfar  = dirAndFar.w; // std::numeric_limits<float>::infinity();
+
+
+  // input time is in [0, 1], while in Embree 0 is the first frame, 1 is the second, 2 - third etc.
+  // therefore we multiply time with the maximum animation length
+  // although instances with fewer frames set will actually continue moving
+  rayhit.ray.time = time * float(maxFrames - 1);
+
+  rayhit.ray.mask   = -1;
+  rayhit.ray.flags  = 0;
+  rayhit.hit.geomID    = RTC_INVALID_GEOMETRY_ID;
+  rayhit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
+
+  // There are multiple variants of rtcIntersect. This one intersects a single ray with the scene.
+  // 
+  rtcIntersect1(m_scene, &rayhit);
+
+  CRT_Hit result;
+  if(rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID)
+  {
+    result.t      = rayhit.ray.tfar;
+    result.geomId = m_geomIdByInstId[rayhit.hit.instID[0]];
+    result.instId = rayhit.hit.instID[0];
+    result.primId = rayhit.hit.primID;
+    result.coords[1] = rayhit.hit.u;
+    result.coords[0] = rayhit.hit.v;
+    result.coords[2] = 1.0f - rayhit.hit.v - rayhit.hit.u;
+  }
+  else
+  {
+    result.t      = rayhit.ray.tfar;
+    result.geomId = uint32_t(-1);
+    result.instId = uint32_t(-1);
+    result.primId = uint32_t(-1);
+  }
+
+  return result;
+}
+
+bool EmbreeRT4::RayQuery_AnyHitMotion(LiteMath::float4 posAndNear, LiteMath::float4 dirAndFar, float time)
+{
+  // The ray hit structure holds both the ray and the hit.
+  // The user must initialize it properly -- see API documentation
+  // for rtcIntersect1() for details.
+  //  
+  struct RTCRay ray;
+  ray.org_x = posAndNear.x;
+  ray.org_y = posAndNear.y;
+  ray.org_z = posAndNear.z;
+  ray.tnear = posAndNear.w;
+
+  ray.dir_x = dirAndFar.x;
+  ray.dir_y = dirAndFar.y;
+  ray.dir_z = dirAndFar.z;
+  ray.tfar  = dirAndFar.w; // std::numeric_limits<float>::infinity();
+
+  ray.time  = time * float(maxFrames - 1);
+  ray.mask  = -1;
+  ray.flags = 0;
+
+  rtcOccluded1(m_scene, &ray);  
+
+  return (ray.tfar < 0.0f);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+ISceneObject* CreateEmbreeRT(const char* a_implName = "") { return new EmbreeRT4; }
+//ISceneObject* CreateSceneRT(const char* a_implName)  {  return CreateEmbreeRT(); }
+//void DeleteSceneRT(ISceneObject* a_pScene)  { delete a_pScene; }
