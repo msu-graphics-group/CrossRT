@@ -117,7 +117,7 @@ struct BVH2CommonRT : public ISceneObject
   std::vector<BVHNode>                         m_allNodes;
   std::vector<uint32_t>                        m_bvhOffsets;
   uint32_t                                     m_tlasOffset    = 0;
-  size_t                                       m_tlasOffsetFirst = 0; // when we call CommitScene() first time, assume BLAS would not be rebuild!
+  size_t                                       m_tlasSize      = 0; ///< number of TLAS nodes at 'm_allNodes[m_tlasOffset]', TLAS is always after all BLAS (see CommitScene)
 
   std::vector<uint2>    m_geomOffsets;
   std::vector<uint32_t> m_geomIdByInstId;

@@ -42,7 +42,7 @@ void BVH2CommonRT::ClearGeom()
   totalTrisMem = 0;
   totalTrisMem = 0;
   totalinstNumInst  = 0;
-  m_tlasOffsetFirst = 0;
+  m_tlasSize        = 0;
   m_tlasOffset      = 0;
   ClearScene();
 }
@@ -183,11 +183,8 @@ void BVH2CommonRT::ClearScene()
   m_instMatricesFwd.resize(0);
   m_geomIdByInstId.resize(0);
 
-  if(m_tlasOffset != 0) // discard TLAS from 'm_allNodes' buffer
-  { 
-    m_allNodes.resize(m_tlasOffset);
-    m_tlasOffset = 0;
-  }
+  // TLAS is kept in 'm_allNodes' until the next CommitScene() which replaces it: BLAS of geometry added
+  // after the previous CommitScene() are located after the TLAS and must not be discarded here
 
   totalTrisInst    = 0;
   totalinstNumInst = 0;
@@ -199,24 +196,24 @@ void BVH2CommonRT::CommitScene(uint32_t a_qualityLevel)
 
   //cbvh2::BuilderPresets presets = {cbvh2::BVH2_LEFT_OFFSET, cbvh2::BVH_CONSTRUCT_FAST, 1};
   cbvh2::BuilderPresets presets = {cbvh2::BVH2_LEFT_OFFSET, cbvh2::BVH_CONSTRUCT_MEDIUM, 1};
-  if(a_qualityLevel == BUILD_LOW && m_tlasOffsetFirst == 0)
+  if(a_qualityLevel == BUILD_LOW && m_tlasSize == 0)
     presets = {cbvh2::BVH2_LEFT_OFFSET, cbvh2::BVH_CONSTRUCT_FAST, 1}; // BUGGY a bit for some scenes, may loose instances. So only use when we need fast update.
 
   auto nodesTLAS = cbvh2::BuildBVH((const cbvh::BVHNode*)m_instBoxes.data(), m_instBoxes.size(), presets);
 
+  // TLAS is stored at the end of 'm_allNodes'. If the previous TLAS is still at the end (no geometry was added after it),
+  // it is replaced in place; otherwise BLAS of new geometry follow it, the previous TLAS stays unused and the new one is appended.
+  // So BLAS data is only appended, and only 'm_allNodes[m_tlasOffset, m_tlasOffset + m_tlasSize)' is rewritten (Update_m_allNodes).
+  //
+  if(m_tlasSize != 0 && size_t(m_tlasOffset) + m_tlasSize == m_allNodes.size())
+    m_allNodes.resize(m_tlasOffset);
+
   m_allNodes.reserve(m_allNodes.size() + 4*nodesTLAS.size()); // reserve for future updates
-
-  if(m_tlasOffsetFirst == 0)
-  {
-    m_tlasOffset      = uint32_t(m_allNodes.size());
-    m_tlasOffsetFirst =          m_allNodes.size();
-  }
-  else
-    m_tlasOffset = m_tlasOffsetFirst;
-
-  m_allNodes.insert(m_allNodes.begin() + m_tlasOffsetFirst, nodesTLAS.begin(), nodesTLAS.end());
+  m_tlasOffset = uint32_t(m_allNodes.size());
+  m_tlasSize   = nodesTLAS.size();
+  m_allNodes.insert(m_allNodes.end(), nodesTLAS.begin(), nodesTLAS.end());
  
-  this->Update_m_allNodes(m_tlasOffsetFirst, nodesTLAS.size());
+  this->Update_m_allNodes(m_tlasOffset, m_tlasSize);
   this->Update_m_instMatricesInv(0, m_instMatricesInv.size());
 
   //std::cout << "[BVH2CommonRT]: totalBVHNodes  = " << m_allNodes.size() << std::endl;
